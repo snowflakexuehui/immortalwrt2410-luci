@@ -238,6 +238,45 @@ function radio_restart(id, ev) {
 	dom.content(dsc, E('em', _('Device is restarting…')));
 }
 
+// 统一的 wifi 重启函数（后台执行，不阻塞UI）
+function wifi_full_restart_background() {
+	// 在后台执行 wifi 重启，不阻塞UI
+	fs.exec('/sbin/wifi', ['restart']).then(function() {
+		// 重启完成后，清除更改标记
+		ui.changes.init();
+	}).catch(function(err) {
+		if (err && err.message && err.message.indexOf('not found') === -1) {
+			console.warn('wifi_restart warning:', err);
+		}
+		// 清除更改标记，因为配置已经保存了
+		ui.changes.init();
+	});
+}
+
+// 重写 ui.changes.apply 函数，使其执行完整的 wifi 重启
+// 保存原始的 apply 函数
+const original_changes_apply = ui.changes.apply;
+
+// 重写 apply 函数
+ui.changes.apply = function() {
+	// 检查是否有 wireless 相关的更改
+	const changes = ui.changes.changes?.wireless;
+	if (changes && Array.isArray(changes) && changes.length > 0) {
+		// 先调用原始的 apply 来显示倒计时弹窗和UI反馈
+		const result = original_changes_apply.apply(this, arguments);
+		
+		// 在后台执行完整的 wifi 重启
+		setTimeout(function() {
+			wifi_full_restart_background();
+		}, 100);
+		
+		return result;
+	} else {
+		// 没有 wireless 相关的更改，使用原始的逻辑
+		return original_changes_apply.apply(this, arguments);
+	}
+};
+
 function network_updown(id, map, ev) {
 	const radio = uci.get('wireless', id, 'device');
 	const disabled = (uci.get('wireless', id, 'disabled') == '1') ||
@@ -263,7 +302,8 @@ function network_updown(id, map, ev) {
 	}
 
 	return map.save().then(function() {
-		ui.changes.apply();
+		// 执行完整的 wifi 重启，而不是单独应用每个接口
+		return wifi_full_restart_background();
 	});
 }
 
@@ -340,7 +380,7 @@ var CBIWifiFrequencyValue = form.Value.extend({
 				'n', 'N', { available: hwmodelist.n },
 				'ac', 'AC', { available: L.hasSystemFeature('hostapd', '11ac') && hwmodelist.ac },
 				'ax', 'AX', { available: L.hasSystemFeature('hostapd', '11ax') && hwmodelist.ax },
-				'be', 'BE', { available: L.hasSystemFeature('hostapd', '11be') && hwmodelist.be }
+				'be', 'BE', { available: hwmodelist.be }
 			];
 
 			// Create a list of HT modes based on device capabilities
@@ -591,37 +631,22 @@ var CBIWifiFrequencyValue = form.Value.extend({
 });
 
 var CBIWifiTxPowerValue = form.ListValue.extend({
-	callTxPowerList: rpc.declare({
-		object: 'iwinfo',
-		method: 'txpowerlist',
-		params: [ 'device' ],
-		expect: { results: [] }
-	}),
-
 	load: function(section_id) {
-		return this.callTxPowerList(section_id).then(L.bind(function(pwrlist) {
-			this.powerval = this.wifiNetwork ? this.wifiNetwork.getTXPower() : null;
-			this.poweroff = this.wifiNetwork ? this.wifiNetwork.getTXPowerOffset() : null;
+		// 提供固定的百分比选项
+		this.value('', _('driver default'));
+		this.value('0', '0%');
+		this.value('25', '25%');
+		this.value('50', '50%');
+		this.value('75', '75%');
+		this.value('100', '100%');
 
-			this.value('', _('driver default'));
-
-			for (let p of pwrlist)
-				this.value(p.dbm, `${p.dbm} dBm (${p.mw} mW)`);
-
-			return form.ListValue.prototype.load.apply(this, [section_id]);
-		}, this));
+		return form.ListValue.prototype.load.apply(this, [section_id]);
 	},
 
 	renderWidget: function(section_id, option_index, cfgvalue) {
 		const widget = form.ListValue.prototype.renderWidget.apply(this, [section_id, option_index, cfgvalue]);
 
 		widget.firstElementChild.style.width = 'auto';
-
-		dom.append(widget, E('span', [
-			' - ', _('Current power'), ': ',
-			E('span', [ this.powerval != null ? `${this.powerval} dBm` : E('em', _('unknown')) ]),
-			this.poweroff ? ` + ${this.poweroff} dB offset = ${this.powerval != null ? this.powerval + this.poweroff : '?'} dBm` : ''
-		]));
 
 		return widget;
 	}
@@ -829,8 +854,10 @@ return view.extend({
 		});
 
 		return Promise.all(tasks)
-			.then(L.bind(ui.changes.init, ui.changes))
-			.then(L.bind(ui.changes.apply, ui.changes));
+			.then(function() {
+				// 执行完整的 wifi 重启，而不是单独应用每个接口
+				return wifi_full_restart_background();
+			});
 	},
 
 	renderMigration: function() {
@@ -1202,11 +1229,16 @@ return view.extend({
 						return mode;
 					};
 
-					o = ss.taboption('general', form.Flag, 'hidden', _('Hide <abbr title="Extended Service Set Identifier">ESSID</abbr>'), _('Where the ESSID is hidden, clients may fail to roam and airtime efficiency may be significantly reduced.'));
-					o.depends('mode', 'ap');
-					o.depends('mode', 'ap-wds');
+				o = ss.taboption('general', form.Flag, 'hidden', _('Hide <abbr title="Extended Service Set Identifier">ESSID</abbr>'), _('Where the ESSID is hidden, clients may fail to roam and airtime efficiency may be significantly reduced.'));
+				o.depends('mode', 'ap');
+				o.depends('mode', 'ap-wds');
 
-					o = ss.taboption('general', form.Flag, 'wmm', _('WMM Mode'), _('Where Wi-Fi Multimedia (WMM) Mode QoS is disabled, clients may be limited to 802.11a/802.11g rates.'));
+				o = ss.taboption('general', form.Flag, 'mlo', _('MLO'), _('Multi-Link Operation (MLO) enables simultaneous use of multiple radio links for improved performance and reliability.'));
+				o.depends('mode', 'ap');
+				o.depends('mode', 'ap-wds');
+				o.rmempty = true;
+
+				o = ss.taboption('general', form.Flag, 'wmm', _('WMM Mode'), _('Where Wi-Fi Multimedia (WMM) Mode QoS is disabled, clients may be limited to 802.11a/802.11g rates.'));
 					o.depends('mode', 'ap');
 					o.depends('mode', 'ap-wds');
 					o.default = o.enabled;

@@ -616,6 +616,42 @@ function formatWifiEncryption(enc) {
 	return 'Unknown';
 }
 
+/**
+ * Format encryption string from UCI config (e.g., 'sae', 'psk2+ccmp', 'none')
+ * to a human-readable format.
+ *
+ * @param {string} enc
+ * The encryption string from UCI config.
+ *
+ * @returns {string|null}
+ * Returns a formatted encryption string or null if invalid.
+ */
+function formatWifiEncryptionString(enc) {
+	if (typeof enc !== 'string' || enc === '')
+		return null;
+
+	if (enc === 'none')
+		return 'None';
+
+	// Map common encryption types to readable format
+	var encryptionMap = {
+		'psk': 'WPA-PSK',
+		'psk2': 'WPA2-PSK',
+		'psk-mixed': 'WPA-PSK/WPA2-PSK',
+		'sae': 'WPA3-SAE',
+		'sae-mixed': 'WPA2-PSK/WPA3-SAE',
+		'wpa': 'WPA-EAP',
+		'wpa2': 'WPA2-EAP',
+		'wpa3': 'WPA3-EAP',
+		'wpa3-mixed': 'WPA2-EAP/WPA3-EAP',
+		'owe': 'OWE'
+	};
+
+	// Handle encryption with cipher suffix (e.g., psk2+ccmp)
+	var baseEncryption = enc.split('+')[0];
+	return encryptionMap[enc] || encryptionMap[baseEncryption] || enc;
+}
+
 function enumerateNetworks() {
 	var uciInterfaces = uci.sections('network', 'interface'),
 	    networks = {};
@@ -3959,7 +3995,23 @@ WifiNetwork = baseclass.extend(/** @lends LuCI.network.WifiNetwork.prototype */ 
 	 * encryption state could not be found in `ubus` runtime information.
 	 */
 	getActiveEncryption: function() {
-		return formatWifiEncryption(this.ubus('net', 'iwinfo', 'encryption')) || '-';
+		// First try to get encryption from ubus network.wireless status (config.encryption)
+		var configEnc = this.ubus('net', 'config', 'encryption');
+		if (configEnc) {
+			var formatted = formatWifiEncryptionString(configEnc);
+			if (formatted)
+				return formatted;
+		}
+
+		// Fallback to iwinfo encryption (object format)
+		var iwinfoEnc = this.ubus('net', 'iwinfo', 'encryption');
+		if (iwinfoEnc) {
+			var formatted = formatWifiEncryption(iwinfoEnc);
+			if (formatted)
+				return formatted;
+		}
+
+		return '-';
 	},
 
 	/**
