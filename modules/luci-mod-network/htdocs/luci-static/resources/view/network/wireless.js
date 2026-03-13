@@ -238,45 +238,6 @@ function radio_restart(id, ev) {
 	dom.content(dsc, E('em', _('Device is restarting…')));
 }
 
-// 统一的 wifi 重启函数（后台执行，不阻塞UI）
-function wifi_full_restart_background() {
-	// 在后台执行 wifi 重启，不阻塞UI
-	fs.exec('/sbin/wifi', ['restart']).then(function() {
-		// 重启完成后，清除更改标记
-		ui.changes.init();
-	}).catch(function(err) {
-		if (err && err.message && err.message.indexOf('not found') === -1) {
-			console.warn('wifi_restart warning:', err);
-		}
-		// 清除更改标记，因为配置已经保存了
-		ui.changes.init();
-	});
-}
-
-// 重写 ui.changes.apply 函数，使其执行完整的 wifi 重启
-// 保存原始的 apply 函数
-const original_changes_apply = ui.changes.apply;
-
-// 重写 apply 函数
-ui.changes.apply = function() {
-	// 检查是否有 wireless 相关的更改
-	const changes = ui.changes.changes?.wireless;
-	if (changes && Array.isArray(changes) && changes.length > 0) {
-		// 先调用原始的 apply 来显示倒计时弹窗和UI反馈
-		const result = original_changes_apply.apply(this, arguments);
-		
-		// 在后台执行完整的 wifi 重启
-		setTimeout(function() {
-			wifi_full_restart_background();
-		}, 100);
-		
-		return result;
-	} else {
-		// 没有 wireless 相关的更改，使用原始的逻辑
-		return original_changes_apply.apply(this, arguments);
-	}
-};
-
 function network_updown(id, map, ev) {
 	const radio = uci.get('wireless', id, 'device');
 	const disabled = (uci.get('wireless', id, 'disabled') == '1') ||
@@ -302,8 +263,7 @@ function network_updown(id, map, ev) {
 	}
 
 	return map.save().then(function() {
-		// 执行完整的 wifi 重启，而不是单独应用每个接口
-		return wifi_full_restart_background();
+		ui.changes.apply();
 	});
 }
 
@@ -854,10 +814,8 @@ return view.extend({
 		});
 
 		return Promise.all(tasks)
-			.then(function() {
-				// 执行完整的 wifi 重启，而不是单独应用每个接口
-				return wifi_full_restart_background();
-			});
+			.then(L.bind(ui.changes.init, ui.changes))
+			.then(L.bind(ui.changes.apply, ui.changes));
 	},
 
 	renderMigration: function() {
